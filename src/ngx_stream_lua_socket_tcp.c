@@ -27,6 +27,9 @@
 #include "ngx_stream_lua_probe.h"
 
 
+// SO_ORIGINAL_DST
+#include <linux/netfilter_ipv4.h>
+
 static int ngx_stream_lua_socket_tcp(lua_State *L);
 static int ngx_stream_lua_socket_tcp_connect(lua_State *L);
 #if (NGX_STREAM_SSL)
@@ -189,6 +192,7 @@ static void ngx_stream_lua_socket_tcp_close_connection(ngx_connection_t *c);
 static int ngx_stream_lua_socket_tcp_peek(lua_State *L);
 static ngx_int_t ngx_stream_lua_socket_tcp_peek_resume(ngx_stream_lua_request_t *r);
 static int ngx_stream_lua_socket_tcp_shutdown(lua_State *L);
+static int ngx_stream_lua_socket_tcp_getorigdest(lua_State *L);
 
 
 enum {
@@ -311,6 +315,9 @@ ngx_stream_lua_inject_socket_tcp_api(ngx_log_t *log, lua_State *L)
 
     lua_pushcfunction(L, ngx_stream_lua_socket_tcp_shutdown);
     lua_setfield(L, -2, "shutdown");
+	
+	lua_pushcfunction(L, ngx_stream_lua_socket_tcp_getorigdest);
+    lua_setfield(L, -2, "getorigdest");
 
     lua_pushvalue(L, -1);
     lua_setfield(L, -2, "__index");
@@ -6248,6 +6255,50 @@ ngx_stream_lua_cleanup_conn_pools(lua_State *L)
     }
 
     lua_pop(L, 1);
+}
+
+static int
+ngx_stream_lua_socket_tcp_getorigdest(lua_State *L)
+{
+    ngx_connection_t                        *c;
+    ngx_stream_lua_socket_tcp_upstream_t    *u;
+
+    luaL_checktype(L, 1, LUA_TTABLE);
+
+    lua_rawgeti(L, 1, SOCKET_CTX_INDEX);
+    u = lua_touserdata(L, -1);
+    lua_pop(L, 1);
+
+    if (u == NULL || u->peer.connection == NULL) {
+        lua_pushnil(L);
+        lua_pushliteral(L, "closed");
+        return 2;
+    }
+
+    c = u->peer.connection;
+    if (c->fd == (ngx_socket_t) -1) {
+        lua_pushnil(L);
+        lua_pushliteral(L, "faked");
+        return 2;
+    }
+
+	struct sockaddr_in orig;
+	socklen_t origlen = sizeof(orig);
+
+	if (getsockopt(c->fd, SOL_IP, SO_ORIGINAL_DST, (struct sockaddr *) &orig, &origlen) != 0) {
+		lua_pushnil(L);
+		lua_pushliteral(L, "failed");
+		return 2;
+	}
+
+	char origName[256];
+	inet_ntop(AF_INET, (void *)&orig.sin_addr, origName, 256);
+	int portnumber = ntohs(orig.sin_port);
+	ssize_t addrend = strlen(origName);
+	sprintf(&origName[addrend], ":%d", portnumber);
+	lua_pushstring(L, origName);
+
+    return 1;
 }
 
 /* vi:set ft=c ts=4 sw=4 et fdm=marker: */
